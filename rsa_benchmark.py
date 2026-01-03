@@ -1,9 +1,3 @@
-"""
-1. Instale liboqs: https://github.com/open-quantum-safe/liboqs
-2. Instale liboqs-python: pip install liboqs-python
-"""
-
-import oqs
 import time
 import os
 import hashlib
@@ -11,24 +5,17 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
 
 
-class PQCBenchmark:
+class RSABenchmark:
 
     def __init__(self):
-        self.algorithms = [
-            "Dilithium2",
-            "Dilithium3",
-            "Dilithium5",
-            "Falcon-512",
-            "Falcon-1024",
-            "SPHINCS+-SHA2-128f-simple",
-            "SPHINCS+-SHA2-128s-simple",
-            "SPHINCS+-SHA2-192f-simple",
-            "SPHINCS+-SHA2-192s-simple",
-            "SPHINCS+-SHA2-256f-simple",
-            "SPHINCS+-SHA2-256s-simple",
-        ]
+        self.key_size = 2048
+        self.public_exponent = 65537
+        self.algorithm_name = "RSA-2048"
 
         # Tamanhos de arquivo
         self.file_sizes = {
@@ -71,18 +58,21 @@ class PQCBenchmark:
 
         for i in range(iterations):
             try:
-                signer = oqs.Signature(algorithm)
-
                 start = time.perf_counter()
-                public_key = signer.generate_keypair()
+
+                # Geração de chave RSA
+                private_key = rsa.generate_private_key(
+                    public_exponent=self.public_exponent,
+                    key_size=self.key_size,
+                    backend=default_backend(),
+                )
+                public_key = private_key.public_key()
+
                 end = time.perf_counter()
 
                 # Descartar primeira iteração (conforme artigo)
                 if i > 0:
                     times.append(end - start)
-
-                # Limpar memória
-                signer.free()
 
             except Exception as e:
                 print(f"    Erro em {algorithm}: {e}")
@@ -109,18 +99,26 @@ class PQCBenchmark:
 
         for i in range(iterations):
             try:
-                signer = oqs.Signature(algorithm)
-                public_key = signer.generate_keypair()
+                private_key = rsa.generate_private_key(
+                    public_exponent=self.public_exponent,
+                    key_size=self.key_size,
+                    backend=default_backend(),
+                )
 
                 start = time.perf_counter()
-                signature = signer.sign(file_data)
+                signature = private_key.sign(
+                    file_data,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH,
+                    ),
+                    hashes.SHA256(),
+                )
                 end = time.perf_counter()
 
                 # Descartar primeira iteração
                 if i > 0:
                     times.append(end - start)
-
-                signer.free()
 
             except Exception as e:
                 print(f"    Erro em {algorithm}: {e}")
@@ -146,14 +144,34 @@ class PQCBenchmark:
             file_data = f.read()
 
         # Gerar chave e assinatura uma vez
-        signer = oqs.Signature(algorithm)
-        public_key = signer.generate_keypair()
-        signature = signer.sign(file_data)
+        private_key = rsa.generate_private_key(
+            public_exponent=self.public_exponent,
+            key_size=self.key_size,
+            backend=default_backend(),
+        )
+
+        public_key = private_key.public_key()
+
+        signature = private_key.sign(
+            file_data,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256(),
+        )
 
         for i in range(iterations):
             try:
                 start = time.perf_counter()
-                is_valid = signer.verify(file_data, signature, public_key)
+                is_valid = public_key.verify(
+                    signature,
+                    file_data,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH,
+                    ),
+                    hashes.SHA256(),
+                )
                 end = time.perf_counter()
 
                 # Descartar primeira iteração
@@ -162,10 +180,7 @@ class PQCBenchmark:
 
             except Exception as e:
                 print(f"    Erro em {algorithm}: {e}")
-                signer.free()
                 return 0, 0
-
-        signer.free()
 
         mean_time = np.mean(times)
         sem = np.std(times) / np.sqrt(len(times))
@@ -309,25 +324,21 @@ def quick_test():
     print("\n TESTE RÁPIDO - Verificação de Instalação")
     print("=" * 60)
 
-    benchmark = PQCBenchmark()
-
-    benchmark.algorithms = ["Dilithium2", "Falcon-512", "SPHINCS+-SHA2-128f-simple"]
+    benchmark = RSABenchmark()
 
     # Teste com arquivo pequeno (10MB) e poucas iterações
     test_file = "quick_test.bin"
     benchmark.generate_test_file(10 * 1024 * 1024, test_file)
+    algo = "rsa"
 
-    for algo in benchmark.algorithms:
-        print(f"\n[{algo}]")
+    mean, sem = benchmark.benchmark_keygen(algo, iterations=11)
+    print(f"  Keygen: {mean*1000:.2f} ms")
 
-        mean, sem = benchmark.benchmark_keygen(algo, iterations=11)
-        print(f"  Keygen: {mean*1000:.2f} ms")
+    mean, sem = benchmark.benchmark_sign(algo, test_file, iterations=11)
+    print(f"  Sign:   {mean*1000:.2f} ms")
 
-        mean, sem = benchmark.benchmark_sign(algo, test_file, iterations=11)
-        print(f"  Sign:   {mean*1000:.2f} ms")
-
-        mean, sem = benchmark.benchmark_verify(algo, test_file, iterations=11)
-        print(f"  Verify: {mean*1000:.2f} ms")
+    mean, sem = benchmark.benchmark_verify(algo, test_file, iterations=11)
+    print(f"  Verify: {mean*1000:.2f} ms")
 
     os.remove(test_file)
     print("\n✅ Teste concluído! Sistema funcionando corretamente.")
